@@ -162,44 +162,86 @@ export default function App() {
 }
 
 function SignIn() {
-  const [email, setEmail] = useState(''), [pw, setPw] = useState(''), [reset, setReset] = useState(false)
-  const [err, setErr] = useState(''), [note, setNote] = useState(''), [busy, setBusy] = useState(false)
-  const limited = e => e.status === 429 || /rate limit|once every/i.test(e.message || '')
-  async function submit(e) {
-    e.preventDefault(); setErr(''); setNote('')
-    const creds = { email: email.trim(), password: pw }
-    if (reset) {
-      setBusy(true)
-      const { error } = await supabase.auth.resetPasswordForEmail(creds.email, { redirectTo: window.location.origin + '/' })
-      setBusy(false)
-      if (error) return setErr(limited(error) ? 'Too many attempts. Wait a minute and try again.' : 'We couldn’t send the link. Check the email and try again.')
-      return setNote('If that email has an account, we’ve sent a link to reset your password. Check your spam folder too.')
-    }
-    if (pw.length < 8) return setErr('Use a password with at least 8 characters.')
-    setBusy(true)
-    const made = await supabase.auth.signUp(creds)
-    if (made.error && limited(made.error)) { setBusy(false); return setErr('Too many attempts. Wait a minute and try again.') }
-    if (!made.error && made.data.session) return setBusy(false)
-    const { error } = await supabase.auth.signInWithPassword(creds)
-    setBusy(false)
-    if (error) setErr(made.error ? 'That email already has an account, but the password is wrong. Try again or reset it.' : 'Check your email to confirm your account, then tap Continue again.')
+  const [mode, setMode] = useState('login') // 'login' | 'signup' | 'reset'
+  const [email, setEmail] = useState(''), [pw, setPw] = useState(''), [show, setShow] = useState(false)
+  const [err, setErr] = useState(''), [detail, setDetail] = useState(''), [note, setNote] = useState(''), [busy, setBusy] = useState(false)
+
+  function friendly(e) {
+    const m = (e && e.message) || ''
+    if (e && (e.status === 429 || /rate limit|once every|too many/i.test(m))) return 'Too many attempts. Please wait a minute and try again.'
+    if (/failed to fetch|networkerror|network request|load failed|invalid api key|no api key|apikey/i.test(m)) return 'We can’t reach the server right now. Check your internet, then try again. If it keeps happening, the app’s connection settings need fixing.'
+    if (/invalid login credentials/i.test(m)) return 'Wrong email or password. Check them and try again, or tap “Forgot your password?”.'
+    if (/already registered|already been registered|already exists/i.test(m)) return 'This email already has an account. Tap “Log in” instead.'
+    if (/not confirmed/i.test(m)) return 'Please confirm your email first. Check your inbox and spam folder for the link, then log in.'
+    if (/password/i.test(m)) return m
+    if (/signups? not allowed|signup is disabled/i.test(m)) return 'New sign-ups are switched off right now.'
+    return 'Something went wrong. Please try again.'
   }
+  function fail(e) { setErr(friendly(e)); setDetail((e && e.message) || '') }
+  function pick(m) { setMode(m); setErr(''); setDetail(''); setNote('') }
+
+  async function submit(ev) {
+    ev.preventDefault(); setErr(''); setDetail(''); setNote('')
+    const creds = { email: email.trim(), password: pw }
+    if (!creds.email) return setErr('Enter your email.')
+    setBusy(true)
+    try {
+      if (mode === 'reset') {
+        const { error } = await supabase.auth.resetPasswordForEmail(creds.email, { redirectTo: window.location.origin + '/' })
+        if (error) fail(error)
+        else setNote('If that email has an account, we’ve sent a link to reset your password. Check your spam folder too.')
+        return
+      }
+      if (pw.length < 8) return setErr('Use a password with at least 8 characters.')
+      if (mode === 'signup') {
+        const { data, error } = await supabase.auth.signUp(creds)
+        if (error) return fail(error)
+        if (data.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) return setErr('This email already has an account. Tap “Log in” instead.')
+        if (!data.session) {
+          const r = await supabase.auth.signInWithPassword(creds)
+          if (r.error) {
+            if (/not confirmed/i.test(r.error.message || '')) { setNote('Account created. We sent a confirmation link to your email. Open it, then come back and log in.'); setMode('login') }
+            else fail(r.error)
+          }
+        }
+        return
+      }
+      const { error } = await supabase.auth.signInWithPassword(creds)
+      if (error) fail(error)
+    } catch (e) {
+      fail(e)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const title = mode === 'reset' ? 'Reset your password' : mode === 'signup' ? 'Create your account' : 'Welcome back'
+  const sub = mode === 'reset' ? 'Enter your email and we’ll send you a link to choose a new password.' : mode === 'signup' ? 'Use your email and choose a password. It takes a few seconds.' : 'Log in with your email and password.'
   return (
     <div className="wrap">
       <div className="top"><Brand /><ThemeToggle /></div>
-      <h1>{reset ? 'Reset your password' : 'Welcome'}</h1>
-      <p className="mu">{reset ? 'Enter your email and we’ll send you a link to choose a new password.' : 'Enter your email and a password. New here? We’ll create your account.'}</p>
+      {mode !== 'reset' && (
+        <div className="filters" role="tablist" aria-label="Log in or create account">
+          <button type="button" role="tab" aria-selected={mode === 'login'} className={'filter' + (mode === 'login' ? ' on' : '')} onClick={() => pick('login')}>Log in</button>
+          <button type="button" role="tab" aria-selected={mode === 'signup'} className={'filter' + (mode === 'signup' ? ' on' : '')} onClick={() => pick('signup')}>Create account</button>
+        </div>
+      )}
+      <h1>{title}</h1>
+      <p className="mu">{sub}</p>
       <form onSubmit={submit}>
         <label htmlFor="em">Email</label>
         <input id="em" type="email" required autoComplete="email" value={email} onChange={e => setEmail(e.target.value)} />
-        {!reset && <>
+        {mode !== 'reset' && <>
           <label htmlFor="pw">Password</label>
-          <input id="pw" type="password" required autoComplete="current-password" value={pw} onChange={e => setPw(e.target.value)} />
+          <input id="pw" type={show ? 'text' : 'password'} required autoComplete={mode === 'signup' ? 'new-password' : 'current-password'} value={pw} onChange={e => setPw(e.target.value)} />
+          <button type="button" className="link-btn" style={{ marginBottom: 8 }} onClick={() => setShow(!show)}>{show ? 'Hide password' : 'Show password'}</button>
         </>}
         {err && <p className="err" role="alert">{err}</p>}
+        {detail && <p className="mu" style={{ fontSize: 12 }}>Details: {detail}</p>}
         {note && <p className="mu" role="status">{note}</p>}
-        <button className="btn" disabled={busy}>{busy ? 'Please wait…' : reset ? 'Send reset link' : 'Continue'}</button>
-        <button type="button" className="link-btn" style={{ marginTop: 10 }} onClick={() => { setReset(!reset); setErr(''); setNote('') }}>{reset ? 'Back' : 'Forgot your password?'}</button>
+        <button className="btn" disabled={busy}>{busy ? 'Please wait…' : mode === 'reset' ? 'Send reset link' : mode === 'signup' ? 'Create account' : 'Log in'}</button>
+        {mode === 'login' && <button type="button" className="link-btn" style={{ marginTop: 10 }} onClick={() => pick('reset')}>Forgot your password?</button>}
+        {mode === 'reset' && <button type="button" className="link-btn" style={{ marginTop: 10 }} onClick={() => pick('login')}>Back to log in</button>}
       </form>
       <p className="mu">By continuing you agree to our <a href="#terms">Terms</a> and <a href="#privacy">Privacy Policy</a>.</p>
     </div>
